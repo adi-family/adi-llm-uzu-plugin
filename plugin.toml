@@ -27,7 +27,7 @@ categories = ["llm", "inference", "local", "apple-silicon"]
 platforms = ["macos-aarch64"]
 
 [binary]
-name = "adi_llm_uzu_plugin"
+name = "plugin"
 
 [requirements]
 os = "macos"
