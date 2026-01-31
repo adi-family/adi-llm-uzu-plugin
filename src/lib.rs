@@ -3,256 +3,197 @@
 //! Provides local LLM inference on Apple Silicon using the Uzu engine.
 //! Optimized for M1/M2/M3 chips with Metal acceleration.
 
-use abi_stable::std_types::{ROption, RResult, RStr, RString, RVec};
-use lib_plugin_abi::{
-    PluginContext, PluginError, PluginInfo, PluginVTable, ServiceDescriptor, ServiceError,
-    ServiceHandle, ServiceMethod, ServiceVTable, ServiceVersion,
+use lib_client_uzu::{Client, GenerateRequest};
+use lib_plugin_abi_v3::{
+    async_trait,
+    cli::{CliCommand, CliCommands, CliContext, CliResult},
+    Plugin, PluginContext, PluginMetadata, PluginType, Result as PluginResult, SERVICE_CLI_COMMANDS,
 };
 use once_cell::sync::Mutex;
 use serde_json::json;
 use std::collections::HashMap;
-use std::ffi::c_void;
 use std::path::PathBuf;
-
-use lib_client_uzu::{Client, GenerateRequest};
-
-/// Plugin-specific CLI service ID
-const SERVICE_CLI: &str = "adi.llm.uzu.cli";
-
-/// Plugin-specific inference service ID
-const SERVICE_INFERENCE: &str = "adi.llm.inference";
 
 /// Loaded models (path -> Client)
 static MODELS: Mutex<Option<HashMap<String, Client>>> = Mutex::new(None);
 
-// === Plugin VTable Implementation ===
+/// Uzu LLM Plugin
+pub struct UzuLlmPlugin;
 
-extern "C" fn plugin_info() -> PluginInfo {
-    PluginInfo::new(
-        "adi.llm.uzu",
-        "ADI Uzu LLM",
-        env!("CARGO_PKG_VERSION"),
-        "extension",
-    )
-    .with_author("ADI Team")
-    .with_description("Local LLM inference on Apple Silicon using Uzu engine")
-    .with_min_host_version("0.8.0")
-}
-
-extern "C" fn plugin_init(ctx: *mut PluginContext) -> i32 {
-    // Initialize models hashmap
-    *MODELS.lock().unwrap() = Some(HashMap::new());
-
-    unsafe {
-        let host = (*ctx).host();
-
-        // Register CLI service
-        let cli_descriptor =
-            ServiceDescriptor::new(SERVICE_CLI, ServiceVersion::new(1, 0, 0), "adi.llm.uzu")
-                .with_description("CLI commands for Uzu LLM management");
-
-        let cli_handle = ServiceHandle::new(
-            SERVICE_CLI,
-            ctx as *const c_void,
-            &CLI_SERVICE_VTABLE as *const ServiceVTable,
-        );
-
-        if let Err(code) = host.register_svc(cli_descriptor, cli_handle) {
-            host.error(&format!("Failed to register CLI service: {}", code));
-            return code;
-        }
-
-        // Register inference service
-        let inference_descriptor = ServiceDescriptor::new(
-            SERVICE_INFERENCE,
-            ServiceVersion::new(1, 0, 0),
-            "adi.llm.uzu",
-        )
-        .with_description("LLM inference service (Apple Silicon only)");
-
-        let inference_handle = ServiceHandle::new(
-            SERVICE_INFERENCE,
-            ctx as *const c_void,
-            &INFERENCE_SERVICE_VTABLE as *const ServiceVTable,
-        );
-
-        if let Err(code) = host.register_svc(inference_descriptor, inference_handle) {
-            host.error(&format!("Failed to register inference service: {}", code));
-            return code;
-        }
-
-        host.info("ADI Uzu LLM plugin initialized");
-    }
-
-    0
-}
-
-extern "C" fn plugin_cleanup(_ctx: *mut PluginContext) {
-    // Clear loaded models
-    if let Ok(mut models) = MODELS.lock() {
-        *models = None;
+impl UzuLlmPlugin {
+    pub fn new() -> Self {
+        Self
     }
 }
 
-// === Plugin Entry Point ===
+impl Default for UzuLlmPlugin {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
-static PLUGIN_VTABLE: PluginVTable = PluginVTable {
-    info: plugin_info,
-    init: plugin_init,
-    update: ROption::RNone,
-    cleanup: plugin_cleanup,
-    handle_message: ROption::RNone,
-};
+#[async_trait]
+impl Plugin for UzuLlmPlugin {
+    fn metadata(&self) -> PluginMetadata {
+        PluginMetadata {
+            id: "adi.llm.uzu".to_string(),
+            name: "ADI Uzu LLM".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            plugin_type: PluginType::Extension,
+            author: Some("ADI Team".to_string()),
+            description: Some("Local LLM inference on Apple Silicon using Uzu engine".to_string()),
+            category: None,
+        }
+    }
 
+    async fn init(&mut self, _ctx: &PluginContext) -> PluginResult<()> {
+        // Initialize models hashmap
+        *MODELS.lock().unwrap() = Some(HashMap::new());
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> PluginResult<()> {
+        // Clear loaded models
+        if let Ok(mut models) = MODELS.lock() {
+            *models = None;
+        }
+        Ok(())
+    }
+
+    fn provides(&self) -> Vec<&'static str> {
+        vec![SERVICE_CLI_COMMANDS]
+    }
+}
+
+#[async_trait]
+impl CliCommands for UzuLlmPlugin {
+    async fn list_commands(&self) -> Vec<CliCommand> {
+        vec![
+            CliCommand {
+                name: "load".to_string(),
+                description: "Load a model".to_string(),
+                usage: "load <model-path>".to_string(),
+                has_subcommands: false,
+            },
+            CliCommand {
+                name: "unload".to_string(),
+                description: "Unload a model".to_string(),
+                usage: "unload <model-path>".to_string(),
+                has_subcommands: false,
+            },
+            CliCommand {
+                name: "list".to_string(),
+                description: "List loaded models".to_string(),
+                usage: "list".to_string(),
+                has_subcommands: false,
+            },
+            CliCommand {
+                name: "generate".to_string(),
+                description: "Generate text".to_string(),
+                usage: "generate <model-path> <prompt> [--max-tokens <n>] [--temperature <t>]".to_string(),
+                has_subcommands: false,
+            },
+            CliCommand {
+                name: "info".to_string(),
+                description: "Show model info".to_string(),
+                usage: "info <model-path>".to_string(),
+                has_subcommands: false,
+            },
+        ]
+    }
+
+    async fn run_command(&self, ctx: &CliContext) -> PluginResult<CliResult> {
+        let subcommand = ctx.subcommand.as_deref().unwrap_or("");
+        let args: Vec<&str> = ctx.args.iter().map(|s| s.as_str()).collect();
+        let options = ctx.options_as_json();
+
+        let result = match subcommand {
+            "load" => {
+                if args.is_empty() {
+                    Err("Usage: load <model-path>".to_string())
+                } else {
+                    load_model(args[0]).map(|_| format!("Model loaded: {}", args[0]))
+                }
+            }
+            "unload" => {
+                if args.is_empty() {
+                    Err("Usage: unload <model-path>".to_string())
+                } else {
+                    unload_model(args[0]).map(|_| format!("Model unloaded: {}", args[0]))
+                }
+            }
+            "list" => {
+                let models = list_models();
+                serde_json::to_string(&models).map_err(|e| e.to_string())
+            }
+            "generate" => {
+                if args.len() < 2 {
+                    Err("Usage: generate <model-path> <prompt> [--max-tokens <n>]".to_string())
+                } else {
+                    let path = args[0];
+                    let prompt = args[1..].join(" ");
+                    let max_tokens = options
+                        .get("max-tokens")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse().ok());
+                    let temperature = options
+                        .get("temperature")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse().ok());
+                    generate_text(path, &prompt, max_tokens, temperature)
+                }
+            }
+            "info" => {
+                if args.is_empty() {
+                    Err("Usage: info <model-path>".to_string())
+                } else {
+                    get_model_info(args[0])
+                }
+            }
+            "" | "help" => Ok(get_help()),
+            _ => Err(format!("Unknown command: {}", subcommand)),
+        };
+
+        match result {
+            Ok(output) => Ok(CliResult::success(output)),
+            Err(e) => Ok(CliResult::error(e)),
+        }
+    }
+}
+
+/// Create the plugin instance (v3 entry point)
 #[no_mangle]
-pub extern "C" fn plugin_entry() -> *const PluginVTable {
-    &PLUGIN_VTABLE
+pub fn plugin_create() -> Box<dyn Plugin> {
+    Box::new(UzuLlmPlugin::new())
 }
 
-// === CLI Service VTable ===
-
-static CLI_SERVICE_VTABLE: ServiceVTable = ServiceVTable {
-    invoke: cli_invoke,
-    list_methods: cli_list_methods,
-};
-
-extern "C" fn cli_invoke(
-    _handle: *const c_void,
-    method: RStr<'_>,
-    args: RStr<'_>,
-) -> RResult<RString, ServiceError> {
-    match method.as_str() {
-        "run_command" => {
-            let result = run_cli_command(args.as_str());
-            match result {
-                Ok(output) => RResult::ROk(RString::from(output)),
-                Err(e) => RResult::RErr(ServiceError::invocation_error(e)),
-            }
-        }
-        "list_commands" => {
-            let commands = json!([
-                {"name": "load", "description": "Load a model", "usage": "load <model-path>"},
-                {"name": "unload", "description": "Unload a model", "usage": "unload <model-path>"},
-                {"name": "list", "description": "List loaded models", "usage": "list"},
-                {"name": "generate", "description": "Generate text", "usage": "generate <model-path> <prompt> [--max-tokens <n>] [--temperature <t>]"},
-                {"name": "info", "description": "Show model info", "usage": "info <model-path>"}
-            ]);
-            RResult::ROk(RString::from(
-                serde_json::to_string(&commands).unwrap_or_default(),
-            ))
-        }
-        _ => RResult::RErr(ServiceError::method_not_found(method.as_str())),
-    }
-}
-
-extern "C" fn cli_list_methods(_handle: *const c_void) -> RVec<ServiceMethod> {
-    vec![
-        ServiceMethod::new("run_command").with_description("Run a CLI command"),
-        ServiceMethod::new("list_commands").with_description("List available commands"),
-    ]
-    .into_iter()
-    .collect()
-}
-
-// === CLI Command Handler ===
-
-fn run_cli_command(args: &str) -> Result<String, String> {
-    let parts: Vec<&str> = args.split_whitespace().collect();
-    if parts.is_empty() {
-        return Err("No command provided".to_string());
-    }
-
-    match parts[0] {
-        "load" => {
-            if parts.len() < 2 {
-                return Err("Usage: load <model-path>".to_string());
-            }
-            let path = parts[1];
-            load_model(path)?;
-            Ok(format!("Model loaded: {}", path))
-        }
-        "unload" => {
-            if parts.len() < 2 {
-                return Err("Usage: unload <model-path>".to_string());
-            }
-            let path = parts[1];
-            unload_model(path)?;
-            Ok(format!("Model unloaded: {}", path))
-        }
-        "list" => {
-            let models = list_models();
-            Ok(serde_json::to_string(&models).unwrap_or_default())
-        }
-        "generate" => {
-            if parts.len() < 3 {
-                return Err("Usage: generate <model-path> <prompt> [--max-tokens <n>]".to_string());
-            }
-            let path = parts[1];
-            let prompt = parts[2..].join(" ");
-            generate_text(path, &prompt, None, None)
-        }
-        "info" => {
-            if parts.len() < 2 {
-                return Err("Usage: info <model-path>".to_string());
-            }
-            let path = parts[1];
-            get_model_info(path)
-        }
-        _ => Err(format!("Unknown command: {}", parts[0])),
-    }
-}
-
-// === Inference Service VTable ===
-
-static INFERENCE_SERVICE_VTABLE: ServiceVTable = ServiceVTable {
-    invoke: inference_invoke,
-    list_methods: inference_list_methods,
-};
-
-extern "C" fn inference_invoke(
-    _handle: *const c_void,
-    method: RStr<'_>,
-    args: RStr<'_>,
-) -> RResult<RString, ServiceError> {
-    match method.as_str() {
-        "generate" => {
-            #[derive(serde::Deserialize)]
-            struct GenerateArgs {
-                model_path: String,
-                prompt: String,
-                #[serde(default)]
-                max_tokens: Option<usize>,
-                #[serde(default)]
-                temperature: Option<f32>,
-            }
-
-            let args: GenerateArgs = match serde_json::from_str(args.as_str()) {
-                Ok(a) => a,
-                Err(e) => return RResult::RErr(ServiceError::invocation_error(e.to_string())),
-            };
-
-            match generate_text(
-                &args.model_path,
-                &args.prompt,
-                args.max_tokens,
-                args.temperature,
-            ) {
-                Ok(output) => RResult::ROk(RString::from(output)),
-                Err(e) => RResult::RErr(ServiceError::invocation_error(e)),
-            }
-        }
-        _ => RResult::RErr(ServiceError::method_not_found(method.as_str())),
-    }
-}
-
-extern "C" fn inference_list_methods(_handle: *const c_void) -> RVec<ServiceMethod> {
-    vec![ServiceMethod::new("generate")
-        .with_description("Generate text using loaded model")]
-    .into_iter()
-    .collect()
+/// Create the CLI commands interface
+#[no_mangle]
+pub fn plugin_create_cli() -> Box<dyn CliCommands> {
+    Box::new(UzuLlmPlugin::new())
 }
 
 // === Helper Functions ===
+
+fn get_help() -> String {
+    r#"ADI Uzu LLM - Local LLM inference on Apple Silicon
+
+Commands:
+  load <model-path>           Load a model
+  unload <model-path>         Unload a model
+  list                        List loaded models
+  generate <path> <prompt>    Generate text
+  info <model-path>           Show model info
+
+Options:
+  --max-tokens <n>            Maximum tokens to generate
+  --temperature <t>           Sampling temperature
+
+Examples:
+  adi llm-uzu load models/llama-3.2-1b.gguf
+  adi llm-uzu generate models/llama-3.2-1b.gguf "Tell me about Rust""#
+        .to_string()
+}
 
 fn load_model(path: &str) -> Result<(), String> {
     let mut models = MODELS
