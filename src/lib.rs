@@ -72,31 +72,31 @@ impl CliCommands for UzuLlmPlugin {
             CliCommand {
                 name: "load".to_string(),
                 description: "Load a model".to_string(),
-                usage: "load <model-path>".to_string(),
+                args: vec![],
                 has_subcommands: false,
             },
             CliCommand {
                 name: "unload".to_string(),
                 description: "Unload a model".to_string(),
-                usage: "unload <model-path>".to_string(),
+                args: vec![],
                 has_subcommands: false,
             },
             CliCommand {
                 name: "list".to_string(),
                 description: "List loaded models".to_string(),
-                usage: "list".to_string(),
+                args: vec![],
                 has_subcommands: false,
             },
             CliCommand {
                 name: "generate".to_string(),
                 description: "Generate text".to_string(),
-                usage: "generate <model-path> <prompt> [--max-tokens <n>] [--temperature <t>]".to_string(),
+                args: vec![],
                 has_subcommands: false,
             },
             CliCommand {
                 name: "info".to_string(),
                 description: "Show model info".to_string(),
-                usage: "info <model-path>".to_string(),
+                args: vec![],
                 has_subcommands: false,
             },
         ]
